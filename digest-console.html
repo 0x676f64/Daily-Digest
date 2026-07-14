@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Executive Digest Console</title>
+<style>
+  :root{
+    --navy:#0a2540; --navy-700:#12395c; --red:#c8102e; --ink:#1a2733;
+    --muted:#5b6b7b; --line:#e3e8ee; --bg:#eef1f5; --card:#ffffff;
+    --ok:#1d9e75; --amber:#c07d17;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--ink);font-variant-numeric:tabular-nums}
+  button{font-family:inherit;cursor:pointer}
+  input,select{font-family:inherit}
+
+  /* top bar */
+  .topbar{display:flex;align-items:center;gap:14px;background:var(--navy);
+          padding:12px 20px;color:#fff;position:sticky;top:0;z-index:5}
+  .mark{width:26px;height:26px;border-radius:6px;background:var(--red);
+        display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px}
+  .brandwrap{display:flex;flex-direction:column;line-height:1.1}
+  .brandwrap b{font-size:15px;font-weight:600}
+  .brandwrap span{font-size:11px;color:#9db4cc}
+  .spacer{flex:1}
+  .status{display:flex;align-items:center;gap:7px;background:#ffffff14;border:1px solid #ffffff2b;
+          color:#fff;border-radius:20px;padding:6px 13px;font-size:12px;font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .dot.on{background:var(--ok)} .dot.off{background:var(--amber)}
+  .btn{border:1px solid transparent;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600}
+  .btn.ghost{background:#ffffff17;border-color:#ffffff30;color:#fff}
+  .btn.ghost:hover{background:#ffffff28}
+  .btn.primary{background:var(--red);color:#fff}
+  .btn.primary:hover{background:#a90d26}
+
+  /* layout */
+  .wrap{display:grid;grid-template-columns:minmax(360px,420px) 1fr;gap:20px;
+        max-width:1200px;margin:20px auto;padding:0 20px}
+  @media(max-width:860px){.wrap{grid-template-columns:1fr}}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+        padding:16px 18px;margin-bottom:16px}
+  .card h3{margin:0 0 4px;font-size:14px;font-weight:600}
+  .card .hint{margin:0 0 14px;font-size:12px;color:var(--muted)}
+
+  /* recipient rows */
+  .rcpt{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+  .rcpt:last-of-type{border-bottom:none}
+  .rcpt .who{flex:1;min-width:0}
+  .rcpt .who b{display:block;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rcpt .who span{font-size:12px;color:var(--muted)}
+  .x{border:none;background:none;color:#b7c0ca;font-size:18px;line-height:1;padding:2px 6px;border-radius:6px}
+  .x:hover{background:#f4f6f9;color:var(--red)}
+
+  /* toggle */
+  .sw{position:relative;width:38px;height:22px;flex:none}
+  .sw input{opacity:0;width:0;height:0;position:absolute}
+  .sw .track{position:absolute;inset:0;background:#cdd6df;border-radius:20px;transition:.15s}
+  .sw .knob{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;
+            border-radius:50%;transition:.15s;box-shadow:0 1px 2px #0002}
+  .sw input:checked + .track{background:var(--navy)}
+  .sw input:checked + .track + .knob{left:18px}
+
+  .addrow{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:12px}
+  .field{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:13px;background:#fff}
+  .field:focus{outline:none;border-color:var(--navy);box-shadow:0 0 0 3px #0a25401a}
+  .add{border:1px solid var(--navy);background:var(--navy);color:#fff;border-radius:8px;padding:0 14px;font-size:13px;font-weight:600}
+  .add:hover{background:var(--navy-700)}
+
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  label.lbl{display:block;font-size:12px;font-weight:600;color:var(--muted);margin:0 0 5px}
+  .togline{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}
+  .togline:last-child{border-bottom:none}
+  .togline .t b{font-size:13px;font-weight:600} .togline .t span{font-size:12px;color:var(--muted)}
+  .colorpick{display:flex;align-items:center;gap:8px}
+  .colorpick input[type=color]{width:34px;height:34px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:2px}
+
+  .footbtns{display:flex;gap:8px}
+  .btn2{flex:1;border:1px solid var(--line);background:#fff;border-radius:8px;padding:9px;font-size:12px;font-weight:600;color:var(--ink)}
+  .btn2:hover{background:#f6f8fb}
+  .saved{font-size:11px;color:var(--muted);text-align:center;margin-top:9px;min-height:14px}
+
+  /* preview pane */
+  .preview{position:sticky;top:80px;align-self:start}
+  .pvcap{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin:2px 0 10px}
+  .pvcap .live{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--ink)}
+  .pvcap .live .dot{background:var(--red)}
+  .stage{background:#dfe4ea;border:1px solid var(--line);border-radius:12px;padding:16px;max-height:78vh;overflow:auto}
+
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--navy);
+         color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;box-shadow:0 6px 24px #0a254040;
+         opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px)}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="mark">C</div>
+  <div class="brandwrap"><b>Executive Digest Console</b><span>CEAS IT · daily morning recap</span></div>
+  <div class="spacer"></div>
+  <button class="status" id="statusBtn" title="Click to pause or resume the daily send">
+    <span class="dot on" id="statusDot"></span><span id="statusTxt">Active</span>
+  </button>
+  <button class="btn ghost" id="testBtn">Send test to me</button>
+  <button class="btn primary" id="saveBtn">Save changes</button>
+</div>
+
+<div class="wrap">
+  <!-- LEFT: controls -->
+  <div>
+    <div class="card">
+      <h3>Recipients</h3>
+      <p class="hint">Everyone here gets their own recap of <em>their</em> previous day. Toggle someone off to pause them without removing.</p>
+      <div id="rcptList"></div>
+      <div class="addrow">
+        <input class="field" id="addName" placeholder="Full name">
+        <input class="field" id="addEmail" placeholder="name@ceasusa.com">
+        <button class="add" id="addBtn">Add</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Schedule</h3>
+      <p class="hint">Sends every weekday morning. Times use the timezone below.</p>
+      <div class="row2">
+        <div><label class="lbl">Send time</label><input class="field" type="time" id="sendTime"></div>
+        <div><label class="lbl">Timezone</label>
+          <select class="field" id="tz">
+            <option value="Central Standard Time">Central (CT)</option>
+            <option value="Eastern Standard Time">Eastern (ET)</option>
+            <option value="Mountain Standard Time">Mountain (MT)</option>
+            <option value="Pacific Standard Time">Pacific (PT)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>What's included</h3>
+      <p class="hint">Turn sections on or off. The email skips any section with nothing in it.</p>
+      <div id="sectionToggles"></div>
+      <div class="togline" style="margin-top:4px">
+        <div class="t"><b>AI summary line</b><span>One-sentence intro at the top. Optional, pennies per month.</span></div>
+        <label class="sw"><input type="checkbox" id="aiTog"><span class="track"></span><span class="knob"></span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Subject &amp; branding</h3>
+      <div style="margin-bottom:12px"><label class="lbl">Subject line</label><input class="field" id="subject"></div>
+      <div style="margin-bottom:12px"><label class="lbl">Organization name</label><input class="field" id="orgName"></div>
+      <div class="row2" style="margin-bottom:12px">
+        <div><label class="lbl">Header color</label><div class="colorpick"><input type="color" id="headerColor"><input class="field" id="headerColorHex"></div></div>
+        <div><label class="lbl">Accent color</label><div class="colorpick"><input type="color" id="accentColor"><input class="field" id="accentColorHex"></div></div>
+      </div>
+      <div><label class="lbl">Logo URL (optional)</label><input class="field" id="logoUrl" placeholder="https://ceasusa.com/logo.png"></div>
+    </div>
+
+    <div class="card">
+      <div class="footbtns">
+        <button class="btn2" id="exportBtn">Download config</button>
+        <button class="btn2" id="copyBtn">Copy config</button>
+      </div>
+      <div class="saved" id="savedNote"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live preview -->
+  <div class="preview">
+    <div class="pvcap"><span class="live"><span class="dot"></span>Live preview</span> — exactly what a recipient receives</div>
+    <div class="stage" id="stage"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SAMPLE = {
+  needsResponse:[
+    {subject:"Q3 pricing review — SP Tools line", meta:"2:00 PM · from Dana Whitfield"},
+    {subject:"TEXA dealer transition sync", meta:"4:30 PM · from Marcus Lee"}
+  ],
+  unread:[
+    {subject:"Re: NetSuite renewal terms", meta:"Priya Anand · 4:52 PM"},
+    {subject:"Warehouse throughput — week 28 numbers", meta:"Operations Report · 3:15 PM"},
+    {subject:"Signed: distributor agreement — Gulf region", meta:"Legal · 1:08 PM"},
+    {subject:"Question on the diesel diagnostic rollout", meta:"Field Support · 10:41 AM"}
+  ],
+  declinedCancelled:[
+    {subject:"Vendor demo — inventory scanning", meta:"11:00 AM · from Sales Ops"}
+  ],
+  onCalendar:[
+    {subject:"Leadership standup", meta:"9:00 AM · from You"},
+    {subject:"1:1 with COO", meta:"1:30 PM · from You"}
+  ]
+};
+
+const DEFAULTS = {
+  active:true,
+  orgName:"Cutting Edge Automotive Solutions",
+  subjectPrefix:"Your daily digest",
+  sendTimeLocal:"07:00",
+  timeZoneId:"Central Standard Time",
+  headerColor:"#0a2540",
+  accentColor:"#c8102e",
+  logoUrl:"",
+  useAiNarrative:false,
+  sections:{needsResponse:true,unread:true,declinedCancelled:true,onCalendar:true},
+  recipients:[
+    {name:"Ray Holloway", email:"ceo@ceasusa.com", enabled:true},
+    {name:"Dana Whitfield", email:"coo@ceasusa.com", enabled:true}
+  ]
+};
+
+const SECTION_LABELS = {
+  needsResponse:["Needs your response","Invites you never answered"],
+  unread:["Unread from yesterday","Mail that arrived and sat"],
+  declinedCancelled:["Declined or cancelled","So nothing vanishes silently"],
+  onCalendar:["On your calendar","Everything else you attended"]
+};
+
+let cfg = structuredClone(DEFAULTS);
+
+/* ---------- storage ---------- */
+async function load(){
+  try{
+    const r = await window.storage.get("digestConfig");
+    if(r && r.value) cfg = Object.assign(structuredClone(DEFAULTS), JSON.parse(r.value));
+  }catch(e){ /* first run or no storage: use defaults */ }
+}
+async function persist(silent){
+  try{ await window.storage.set("digestConfig", JSON.stringify(cfg)); }
+  catch(e){ /* storage unavailable: keep in memory */ }
+  if(!silent) note("Saved "+new Date().toLocaleTimeString());
+}
+function note(t){ document.getElementById("savedNote").textContent = t; }
+function toast(t){ const el=document.getElementById("toast"); el.textContent=t; el.classList.add("show"); setTimeout(()=>el.classList.remove("show"),2200); }
+
+/* ---------- email preview (mirrors the engine's New-DigestHtml) ---------- */
+function esc(s){ return s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function emailHtml(){
+  const navy=cfg.headerColor, red=cfg.accentColor, line="#e3e8ee", muted="#5b6b7b";
+  const rowsFor = list => list.map(i=>
+    `<tr><td style="padding:10px 14px;border-bottom:1px solid ${line}">
+       <div style="font-size:14px;font-weight:600;color:${navy}">${esc(i.subject)}</div>
+       <div style="font-size:12px;color:${muted};margin-top:3px">${esc(i.meta)}</div></td></tr>`).join("");
+  const pill = (n,bg)=>`<span style="background:${bg};color:#fff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px">${n}</span>`;
+  const section=(title,list,accent,tint)=> list.length? 
+    `<div style="margin:0 0 20px;border:1px solid ${line};border-left:4px solid ${accent};border-radius:6px;overflow:hidden">
+       <div style="background:${tint};padding:11px 14px">
+         <span style="font-size:13px;font-weight:700;color:#1a2733;text-transform:uppercase;letter-spacing:.4px">${title}</span> ${pill(list.length,accent)}
+       </div>
+       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${rowsFor(list)}</table>
+     </div>` : "";
+  const metric=(n,l,fg,lc)=>`<td width="33%" style="padding:16px 10px;text-align:center;border-right:1px solid #e8edf3">
+       <div style="font-size:30px;font-weight:700;color:${fg};line-height:1">${n}</div>
+       <div style="font-size:11px;font-weight:700;color:${lc};text-transform:uppercase;letter-spacing:.5px;margin-top:5px">${l}</div></td>`;
+
+  const intro = cfg.useAiNarrative ?
+    `<div style="background:#f7f9fc;border:1px solid ${line};border-radius:6px;padding:14px 16px;margin:0 0 20px;font-size:14px;color:#1a2733;line-height:1.5">Two meeting invites from yesterday are still awaiting your response, and four messages arrived unread. Nothing time-critical appears overdue.</div>` : "";
+  const logo = cfg.logoUrl ? `<img src="${esc(cfg.logoUrl)}" height="24" style="display:block;margin-bottom:8px" alt="">` : "";
+
+  let sec="";
+  if(cfg.sections.needsResponse)     sec+=section("Needs your response",  SAMPLE.needsResponse,     red,      "#fdecee");
+  if(cfg.sections.unread)            sec+=section("Unread from yesterday", SAMPLE.unread,            navy,     "#eaf1f9");
+  if(cfg.sections.declinedCancelled) sec+=section("Declined or cancelled", SAMPLE.declinedCancelled, "#8a97a6","#f1f4f7");
+  if(cfg.sections.onCalendar)        sec+=section("On your calendar",      SAMPLE.onCalendar,        "#8a97a6","#f1f4f7");
+
+  return `<div style="max-width:600px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;background:#fff;border:1px solid ${line};border-radius:10px;overflow:hidden">
+    <div style="background:${navy};padding:20px 24px">${logo}
+      <div style="color:#fff;font-size:17px;font-weight:600">Daily executive digest</div>
+      <div style="color:#9db4cc;font-size:12px;margin-top:3px">${esc(cfg.orgName)} &nbsp;·&nbsp; Recap of Monday, July 13</div>
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-bottom:1px solid ${line}">
+      <tr>
+        ${metric(SAMPLE.needsResponse.length,"Need response",red,"#8a3a44")}
+        ${metric(SAMPLE.unread.length,"Unread",navy,"#3c5a78")}
+        ${metric(SAMPLE.declinedCancelled.length,"Cancelled","#5f6b78","#5f6b78")}
+      </tr>
+    </table>
+    <div style="padding:22px 24px">${intro}${sec || '<div style="color:#8a97a6;font-size:13px;text-align:center;padding:20px">All sections are turned off.</div>'}</div>
+    <div style="padding:14px 24px;background:#fafbfc;border-top:1px solid ${line};font-size:11px;color:#9aa7b4">Automated recap from ${esc(cfg.orgName)}. Times shown in local time.</div>
+  </div>`;
+}
+
+/* ---------- render controls ---------- */
+function renderRecipients(){
+  const el=document.getElementById("rcptList"); el.innerHTML="";
+  cfg.recipients.forEach((r,i)=>{
+    const row=document.createElement("div"); row.className="rcpt";
+    row.innerHTML=`<label class="sw"><input type="checkbox" ${r.enabled?"checked":""}><span class="track"></span><span class="knob"></span></label>
+      <div class="who"><b>${esc(r.name||r.email)}</b><span>${esc(r.email)}</span></div>
+      <button class="x" title="Remove">&times;</button>`;
+    row.querySelector("input").addEventListener("change",e=>{ r.enabled=e.target.checked; });
+    row.querySelector(".x").addEventListener("click",()=>{ cfg.recipients.splice(i,1); renderRecipients(); });
+    el.appendChild(row);
+  });
+}
+function renderSectionToggles(){
+  const el=document.getElementById("sectionToggles"); el.innerHTML="";
+  Object.keys(SECTION_LABELS).forEach(k=>{
+    const [t,s]=SECTION_LABELS[k];
+    const line=document.createElement("div"); line.className="togline";
+    line.innerHTML=`<div class="t"><b>${t}</b><span>${s}</span></div>
+      <label class="sw"><input type="checkbox" ${cfg.sections[k]?"checked":""}><span class="track"></span><span class="knob"></span></label>`;
+    line.querySelector("input").addEventListener("change",e=>{ cfg.sections[k]=e.target.checked; refresh(); });
+    el.appendChild(line);
+  });
+}
+function syncControls(){
+  document.getElementById("sendTime").value=cfg.sendTimeLocal;
+  document.getElementById("tz").value=cfg.timeZoneId;
+  document.getElementById("subject").value=cfg.subjectPrefix;
+  document.getElementById("orgName").value=cfg.orgName;
+  document.getElementById("headerColor").value=cfg.headerColor;
+  document.getElementById("headerColorHex").value=cfg.headerColor;
+  document.getElementById("accentColor").value=cfg.accentColor;
+  document.getElementById("accentColorHex").value=cfg.accentColor;
+  document.getElementById("logoUrl").value=cfg.logoUrl;
+  document.getElementById("aiTog").checked=cfg.useAiNarrative;
+  const on=cfg.active;
+  document.getElementById("statusDot").className="dot "+(on?"on":"off");
+  document.getElementById("statusTxt").textContent=on?"Active":"Paused";
+}
+function refresh(){ document.getElementById("stage").innerHTML=emailHtml(); }
+
+/* ---------- wire up ---------- */
+function bindColor(pick,hex,key){
+  const p=document.getElementById(pick), h=document.getElementById(hex);
+  p.addEventListener("input",()=>{ cfg[key]=p.value; h.value=p.value; refresh(); });
+  h.addEventListener("change",()=>{ if(/^#[0-9a-fA-F]{6}$/.test(h.value)){ cfg[key]=h.value; p.value=h.value; refresh(); } });
+}
+function init(){
+  renderRecipients(); renderSectionToggles(); syncControls(); refresh();
+
+  document.getElementById("addBtn").addEventListener("click",()=>{
+    const n=document.getElementById("addName"), e=document.getElementById("addEmail");
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.value)){ toast("Enter a valid email address"); return; }
+    cfg.recipients.push({name:n.value.trim(),email:e.value.trim(),enabled:true});
+    n.value=""; e.value=""; renderRecipients();
+  });
+  document.getElementById("sendTime").addEventListener("change",e=>cfg.sendTimeLocal=e.target.value);
+  document.getElementById("tz").addEventListener("change",e=>cfg.timeZoneId=e.target.value);
+  document.getElementById("subject").addEventListener("input",e=>cfg.subjectPrefix=e.target.value);
+  document.getElementById("orgName").addEventListener("input",e=>{cfg.orgName=e.target.value;refresh();});
+  document.getElementById("logoUrl").addEventListener("input",e=>{cfg.logoUrl=e.target.value.trim();refresh();});
+  document.getElementById("aiTog").addEventListener("change",e=>{cfg.useAiNarrative=e.target.checked;refresh();});
+  bindColor("headerColor","headerColorHex","headerColor");
+  bindColor("accentColor","accentColorHex","accentColor");
+
+  document.getElementById("statusBtn").addEventListener("click",()=>{ cfg.active=!cfg.active; syncControls(); });
+  document.getElementById("saveBtn").addEventListener("click",()=>persist(false));
+  document.getElementById("testBtn").addEventListener("click",()=>toast("In the deployed console this emails a test digest to you. (Preview shown at right.)"));
+
+  document.getElementById("exportBtn").addEventListener("click",()=>{
+    const out=exportConfig();
+    const blob=new Blob([JSON.stringify(out,null,2)],{type:"application/json"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="digest-config.json"; a.click();
+  });
+  document.getElementById("copyBtn").addEventListener("click",async()=>{
+    try{ await navigator.clipboard.writeText(JSON.stringify(exportConfig(),null,2)); toast("Config copied to clipboard"); }
+    catch(e){ toast("Copy not available here — use Download"); }
+  });
+}
+function exportConfig(){
+  // sender is set once by IT at deploy time; surfaced here for completeness
+  return {
+    orgName:cfg.orgName, sender:cfg.sender||"reports@ceasusa.com",
+    subjectPrefix:cfg.subjectPrefix, sendTimeLocal:cfg.sendTimeLocal, timeZoneId:cfg.timeZoneId,
+    headerColor:cfg.headerColor, accentColor:cfg.accentColor, logoUrl:cfg.logoUrl,
+    useAiNarrative:cfg.useAiNarrative, active:cfg.active, sections:cfg.sections,
+    recipients:cfg.recipients
+  };
+}
+
+(async()=>{ await load(); init(); })();
+</script>
+</body>
+</html>
