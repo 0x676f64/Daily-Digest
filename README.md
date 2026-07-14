@@ -167,3 +167,78 @@ Secrets are **never** in this file — they live in environment or Automation va
 - No physical meeting-attendance ("did they no-show") — only invite-response state.
 - The one PowerShell scoping command has no GUI equivalent today; everything else is clickable.
 - Next steps worth considering: a one-click "Deploy to Azure" button so even the initial deploy is button-driven; a "Send test to me" wired to the live engine; per-recipient section preferences.
+
+---
+
+## One-click deploy (recommended)
+
+This replaces the manual engine setup above with a button and a single script. Files involved:
+`main.bicep` (infrastructure), `Grant-DigestPermissions.ps1` (the one post-deploy step),
+`Send-ExecDailyDigest.ps1` (the engine, pulled in automatically).
+
+### 1. Put the files in a repo
+
+Commit the three files to a GitHub repo (public, or private with a raw token). The Bicep
+pulls the engine straight from its raw URL, so no manual runbook upload.
+
+Compile the Bicep to the JSON the button needs:
+
+```
+az bicep build --file main.bicep     # produces azuredeploy.json
+```
+
+Commit `azuredeploy.json` too.
+
+### 2. The button
+
+Point it at your committed `azuredeploy.json` (URL-encode the raw URL):
+
+```markdown
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2F<owner>%2F<repo>%2Fmain%2Fazuredeploy.json)
+```
+
+Clicking it opens the Azure portal with a form. Fill in **runbookUri** (the raw URL to
+`Send-ExecDailyDigest.ps1`), adjust the timezone/start time if needed, and Create. That stands
+up storage, the config container, the Automation account and its managed identity, the runbook,
+the weekday 7 AM schedule, and the role grant — in one deployment.
+
+### 3. The one post-deploy step
+
+Copy the `managedIdentityObjectId` from the deployment's Outputs, then run once:
+
+```powershell
+.\Grant-DigestPermissions.ps1 -AutomationPrincipalId <thatObjectId> -LeadershipGroup leadership-digest@ceasusa.com
+```
+
+This grants the identity its Graph permissions and fences it to the leadership group. After a
+few minutes for consent to propagate, the engine is live — no secret stored anywhere.
+
+### 4. Seed the config
+
+Save your settings in the Digest Console, Download the `digest-config.json`, and upload it into
+the **config** container of the storage account (Azure portal → the storage account → Containers
+→ config → Upload). That's a portal click, no terminal. From then on the engine reads it every
+morning.
+
+### What's genuinely one-click vs. not
+
+- **One button:** all Azure infrastructure + the engine + the schedule.
+- **One script, once:** Graph permissions + mailbox scoping (no ARM equivalent exists for these).
+- **A few portal clicks:** uploading the first config, and — for now — hosting the console.
+
+### Hosting the console behind sign-in
+
+The console is a static file, so the tidy home for it is **Azure Static Web Apps** (free tier),
+which gives it a URL and Microsoft Entra sign-in with almost no config. Add this
+`staticwebapp.config.json` beside `digest-console.html` to require an org login:
+
+```json
+{
+  "routes": [ { "route": "/*", "allowedRoles": ["authenticated"] } ],
+  "responseOverrides": { "401": { "redirect": "/.auth/login/aad", "statusCode": 302 } }
+}
+```
+
+Wiring the console's Save button to write `digest-config.json` back to the storage container
+(so admins never download/upload) is a small Static Web Apps API function — the natural next
+increment once the engine is running.
