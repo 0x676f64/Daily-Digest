@@ -1,51 +1,75 @@
 <#
-  Executive Daily Digest - ENGINE
-  --------------------------------
-  Runs headless on a schedule (Azure Automation runbook or Azure Function timer).
-  Nobody edits this file day to day. All the settings a person would want to change
-  -- who gets the digest, the send time, branding, which sections appear -- live in
-  digest-config.json, which the Digest Console writes. This engine just reads that
-  config and sends.
+  Executive Daily Digest - ENGINE  (dual-mode)
+  --------------------------------------------
+  Runs headless on a schedule. Two ways to authenticate, auto-detected:
 
-  Secrets (tenant/client/secret) come from environment or Automation variables,
-  never from the config file.
+    * In Azure (Automation runbook): uses the account's MANAGED IDENTITY.
+      No secret stored anywhere. Config is read from the storage blob.
 
-  Graph application permissions required (admin-consented):
-      Mail.Read, Calendars.Read, Mail.Send
-  Scope the app to the leadership mailboxes only, with an Exchange Online
-  Application Access Policy. (One-time IT step; see README.)
+    * On your desktop (testing): uses a client secret from environment
+      variables, and reads digest-config.json from disk.
+
+  Graph application permissions required (granted to whichever identity is used,
+  and admin-consented):  Mail.Read, Calendars.Read, Mail.Send
+  Scope the identity to the leadership mailboxes with an Exchange Online
+  Application Access Policy. (Both done once by Grant-DigestPermissions.ps1.)
 #>
 
-# --- Secrets (never in the config file) ---------------------------------------
-$TenantId     = $env:DIGEST_TENANT_ID
-$ClientId     = $env:DIGEST_CLIENT_ID
-$ClientSecret = $env:DIGEST_CLIENT_SECRET
-
-# Optional Azure OpenAI (only used if the config turns the AI intro on)
-$AoaiEndpoint   = $env:AOAI_ENDPOINT
-$AoaiDeployment = $env:AOAI_DEPLOYMENT
-$AoaiApiKey     = $env:AOAI_API_KEY
-
-# --- Load config --------------------------------------------------------------
-$ConfigPath = if ($env:DIGEST_CONFIG_PATH) { $env:DIGEST_CONFIG_PATH } else { Join-Path $PSScriptRoot 'digest-config.json' }
-if (-not (Test-Path $ConfigPath)) { throw "Config not found at $ConfigPath. Save it from the Digest Console first." }
-$cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-
 $MaxItems = 50
+$UseManagedIdentity = [bool]$env:IDENTITY_ENDPOINT   # present in the Azure Automation sandbox
 
-# --- Auth ---------------------------------------------------------------------
+# --- read a setting from Automation variable (in Azure) or env var (local) ----
+function Get-Setting {
+    param([string]$AutoName, [string]$EnvName, [string]$Default = $null)
+    if (Get-Command Get-AutomationVariable -ErrorAction SilentlyContinue) {
+        try { $v = Get-AutomationVariable -Name $AutoName; if ($v) { return $v } } catch {}
+    }
+    if ($EnvName -and (Test-Path "env:$EnvName")) { return (Get-Item "env:$EnvName").Value }
+    $Default
+}
+
+# --- token from the managed identity (Azure) ----------------------------------
+function Get-MiToken {
+    param([string]$Resource)
+    (Invoke-RestMethod -Method Get `
+        -Uri "$($env:IDENTITY_ENDPOINT)?resource=$Resource&api-version=2019-08-01" `
+        -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
+}
+
+# --- Graph token (either mode) ------------------------------------------------
 function Get-GraphToken {
+    if ($UseManagedIdentity) { return Get-MiToken -Resource 'https://graph.microsoft.com' }
     $body = @{
-        client_id     = $ClientId
-        client_secret = $ClientSecret
+        client_id     = $env:DIGEST_CLIENT_ID
+        client_secret = $env:DIGEST_CLIENT_SECRET
         scope         = 'https://graph.microsoft.com/.default'
         grant_type    = 'client_credentials'
     }
     (Invoke-RestMethod -Method Post `
-        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
+        -Uri "https://login.microsoftonline.com/$($env:DIGEST_TENANT_ID)/oauth2/v2.0/token" `
         -ContentType 'application/x-www-form-urlencoded' -Body $body).access_token
 }
 
+# --- config (blob in Azure, file locally) -------------------------------------
+function Get-Config {
+    if ($UseManagedIdentity) {
+        $acct = Get-Setting 'StorageAccount'  'DIGEST_STORAGE_ACCOUNT'
+        $cont = Get-Setting 'ConfigContainer' 'DIGEST_CONFIG_CONTAINER' 'config'
+        $blob = Get-Setting 'ConfigBlob'      'DIGEST_CONFIG_BLOB'      'digest-config.json'
+        $tok  = Get-MiToken -Resource 'https://storage.azure.com'
+        $raw  = Invoke-RestMethod -Method Get `
+                    -Uri "https://$acct.blob.core.windows.net/$cont/$blob" `
+                    -Headers @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06' }
+        if ($raw -is [string]) { return ($raw | ConvertFrom-Json) } else { return $raw }
+    }
+    $path = if ($env:DIGEST_CONFIG_PATH) { $env:DIGEST_CONFIG_PATH } else { Join-Path $PSScriptRoot 'digest-config.json' }
+    if (-not (Test-Path $path)) { throw "Config not found at $path. Save it from the Digest Console first." }
+    Get-Content $path -Raw | ConvertFrom-Json
+}
+
+$cfg = Get-Config
+
+# --- Graph helpers ------------------------------------------------------------
 function Invoke-GraphGet {
     param([string]$Uri, [hashtable]$ExtraHeaders = @{})
     $headers = @{ Authorization = "Bearer $script:Token" }
@@ -59,7 +83,6 @@ function Invoke-GraphGet {
     $items
 }
 
-# --- Yesterday's local-day window, expressed in UTC ---------------------------
 function Get-YesterdayWindowUtc {
     $tz         = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
     $nowLocal   = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
@@ -72,7 +95,6 @@ function Get-YesterdayWindowUtc {
     }
 }
 
-# --- Data pulls ---------------------------------------------------------------
 function Get-UnreadYesterday {
     param([string]$Upn, [string]$StartUtc, [string]$EndUtc)
     $filter = "isRead eq false and receivedDateTime ge $StartUtc and receivedDateTime lt $EndUtc"
@@ -103,7 +125,6 @@ function Split-Events {
     [pscustomobject]@{ NeedsResponse = $needs; DeclinedCancelled = $gone; OnCalendar = $cal }
 }
 
-# --- Optional AI intro (off unless config enables it) -------------------------
 function Get-AiIntro {
     param([string]$Facts)
     if (-not $cfg.useAiNarrative) { return $null }
@@ -115,9 +136,9 @@ function Get-AiIntro {
         max_tokens = 120; temperature = 0.3
     } | ConvertTo-Json -Depth 6
     try {
-        $uri = "$AoaiEndpoint/openai/deployments/$AoaiDeployment/chat/completions?api-version=2024-06-01"
+        $uri = "$($env:AOAI_ENDPOINT)/openai/deployments/$($env:AOAI_DEPLOYMENT)/chat/completions?api-version=2024-06-01"
         (Invoke-RestMethod -Method Post -Uri $uri -ContentType 'application/json' `
-            -Headers @{ 'api-key'=$AoaiApiKey } -Body $body).choices[0].message.content
+            -Headers @{ 'api-key'=$env:AOAI_API_KEY } -Body $body).choices[0].message.content
     } catch { $null }
 }
 
@@ -128,7 +149,7 @@ function New-DigestHtml {
     $navy = $cfg.headerColor
     $red  = $cfg.accentColor
     $ink  = '#1a2733'; $muted='#5b6b7b'; $line='#e3e8ee'
-    $enc  = { param($s) [System.Web.HttpUtility]::HtmlEncode($s) }
+    $enc  = { param($s) [System.Net.WebUtility]::HtmlEncode($s) }
 
     function Pill($text,$bg){ "<span style='background:$bg;color:#ffffff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px'>$text</span>" }
 
@@ -137,7 +158,6 @@ function New-DigestHtml {
         "<div style='font-size:30px;font-weight:700;color:$fg;line-height:1'>$num</div>" +
         "<div style='font-size:11px;font-weight:700;color:$lblc;text-transform:uppercase;letter-spacing:.5px;margin-top:5px'>$label</div></td>"
     }
-
     function EmailRow($m){
         $from = if ($m.from.emailAddress.name){$m.from.emailAddress.name}else{$m.from.emailAddress.address}
         $t = ([datetime]$m.receivedDateTime).ToLocalTime().ToString('h:mm tt')
@@ -151,7 +171,6 @@ function New-DigestHtml {
         "<div style='font-size:14px;font-weight:600;color:$navy'>$(& $enc $e.subject)</div>" +
         "<div style='font-size:12px;color:$muted;margin-top:3px'>$t &nbsp;&middot;&nbsp; from $(& $enc $e.organizer.emailAddress.name)</div></td></tr>"
     }
-
     function Section($title,$rows,$count,$accent,$tint){
         if ($count -eq 0){ return "" }
         "<div style='margin:0 0 20px;border:1px solid $line;border-left:4px solid $accent;border-radius:6px;overflow:hidden'>" +
@@ -165,7 +184,6 @@ function New-DigestHtml {
     $needRows  = ($Meetings.NeedsResponse     | ForEach-Object { EventRow $_ }) -join ''
     $goneRows  = ($Meetings.DeclinedCancelled | ForEach-Object { EventRow $_ }) -join ''
     $calRows   = ($Meetings.OnCalendar        | ForEach-Object { EventRow $_ }) -join ''
-
     $introBlock = if ($Intro){ "<div style='background:#f7f9fc;border:1px solid $line;border-radius:6px;padding:14px 16px;margin:0 0 20px;font-size:14px;color:$ink;line-height:1.5'>$(& $enc $Intro)</div>" } else { "" }
 
     $sec = ""
@@ -191,13 +209,8 @@ function New-DigestHtml {
       $(Metric $Meetings.DeclinedCancelled.Count 'Cancelled' '#5f6b78' '#5f6b78')
     </tr>
   </table>
-  <div style="padding:22px 24px">
-    $introBlock
-    $sec
-  </div>
-  <div style="padding:14px 24px;background:#fafbfc;border-top:1px solid $line;font-size:11px;color:#9aa7b4">
-    Automated recap from $($cfg.orgName). Times shown in local time.
-  </div>
+  <div style="padding:22px 24px">$introBlock$sec</div>
+  <div style="padding:14px 24px;background:#fafbfc;border-top:1px solid $line;font-size:11px;color:#9aa7b4">Automated recap from $($cfg.orgName). Times shown in local time.</div>
 </div>
 </div>
 "@
@@ -220,10 +233,9 @@ function Send-Digest {
 }
 
 # --- Main ---------------------------------------------------------------------
-Add-Type -AssemblyName System.Web
 $script:Token = Get-GraphToken
 $win = Get-YesterdayWindowUtc
-Write-Output "Digest run for $($win.Label)"
+Write-Output "Digest run for $($win.Label) (managed identity: $UseManagedIdentity)"
 
 foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
     $upn = $r.email
@@ -235,7 +247,6 @@ foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
         if ($unread.Count -eq 0 -and $meetings.NeedsResponse.Count -eq 0 -and $meetings.DeclinedCancelled.Count -eq 0) {
             Write-Output "$upn : nothing to report, skipped."; continue
         }
-
         $facts = "Unread: $($unread.Count). Never-responded meetings: $($meetings.NeedsResponse.Count). Declined/cancelled: $($meetings.DeclinedCancelled.Count)."
         $intro = Get-AiIntro -Facts $facts
         $html  = New-DigestHtml -Label $win.Label -Unread $unread -Meetings $meetings -Intro $intro
