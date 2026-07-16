@@ -1,5 +1,5 @@
 <#
-  Test-DigestPermissions.ps1 — run LOCALLY from your PC (not in Azure).
+  Test-DigestPermissions.ps1 -- run LOCALLY from your PC (not in Azure).
   Verifies the two things that cause a 403:
     1. Are the Graph app roles actually assigned to the managed identity?
     2. Is the Application Access Policy scoping the identity to the mailbox?
@@ -51,10 +51,11 @@ if ($granted.Count -eq 0) {
 Write-Host "`n=== 2. APPLICATION ACCESS POLICY ===" -ForegroundColor Cyan
 Connect-ExchangeOnline -ShowBanner:$false
 
-$policies = Get-ApplicationAccessPolicy | Where-Object { $_.AppId -eq $mi.AppId }
+$policies = Get-ApplicationAccessPolicy -ErrorAction SilentlyContinue | Where-Object { $_.AppId -eq $mi.AppId }
 if (-not $policies) {
     Write-Host "  No access policy found for this app." -ForegroundColor Yellow
-    Write-Host "  -> Without one, the app can read EVERY mailbox (permitted, but not what we want)." -ForegroundColor Yellow
+    Write-Host "  -> Without one, the app can read EVERY mailbox in the tenant." -ForegroundColor Yellow
+    Write-Host "  -> Note: section 3 will report 'Granted' for ANY mailbox in this state." -ForegroundColor Yellow
     Write-Host "  -> This is NOT the cause of a 403." -ForegroundColor DarkGray
 } else {
     foreach ($p in $policies) {

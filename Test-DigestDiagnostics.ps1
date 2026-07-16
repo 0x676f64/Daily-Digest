@@ -1,5 +1,5 @@
 <#
-  Test-DigestDiagnostics.ps1 — throwaway. Import, publish, Start, read Output.
+  Test-DigestDiagnostics.ps1 -- throwaway. Import, publish, Start, read Output.
   Dumps what the engine actually sees. Sends nothing. Reads no mailboxes.
 #>
 

@@ -98,16 +98,9 @@ if ($RemoveLegacyPolicy) {
 }
 
 # --- 5. Show the result --------------------------------------------------------
-$ErrorActionPreference = 'Continue'
 Write-Host "`n5. Current state" -ForegroundColor Cyan
-foreach ($r in $roles) {
-    $a = Get-ManagementRoleAssignment -Identity $r.Name -ErrorAction SilentlyContinue
-    if ($a) {
-        Write-Host ("   {0,-26} scope: {1}" -f $a.Role, $a.CustomResourceScope) -ForegroundColor Green
-    } else {
-        Write-Host ("   {0,-26} NOT FOUND" -f $r.Role) -ForegroundColor Red
-    }
-}
+Get-ManagementRoleAssignment -App $AppId -ErrorAction SilentlyContinue |
+    Format-Table Name, Role, CustomResourceScope -AutoSize
 
 Write-Host "Mailboxes in scope (members of $LeadershipGroup):" -ForegroundColor Cyan
 Get-DistributionGroupMember -Identity $LeadershipGroup |

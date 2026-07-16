@@ -57,10 +57,21 @@ function Get-Config {
         $cont = Get-Setting 'ConfigContainer' 'DIGEST_CONFIG_CONTAINER' 'config'
         $blob = Get-Setting 'ConfigBlob'      'DIGEST_CONFIG_BLOB'      'digest-config.json'
         $tok  = Get-MiToken -Resource 'https://storage.azure.com'
-        $raw  = Invoke-RestMethod -Method Get `
-                    -Uri "https://$acct.blob.core.windows.net/$cont/$blob" `
-                    -Headers @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06' }
-        if ($raw -is [string]) { return ($raw | ConvertFrom-Json) } else { return $raw }
+        $url  = "https://$acct.blob.core.windows.net/$cont/$blob"
+        try {
+            $raw = Invoke-RestMethod -Method Get -Uri $url -ErrorAction Stop `
+                       -Headers @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06' }
+        } catch {
+            throw "Could not read config from $url : $($_.Exception.Message). " +
+                  "A 404 means the container or blob name is wrong (names are case-sensitive) " +
+                  "or the file was never uploaded. A 403 means the managed identity is missing " +
+                  "the Storage Blob Data Contributor role."
+        }
+        $parsed = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw }
+        if (-not $parsed.timeZoneId -or -not $parsed.recipients) {
+            throw "Config at $url parsed but is missing required fields (timeZoneId / recipients). Re-download it from the Digest Console."
+        }
+        return $parsed
     }
     $path = if ($env:DIGEST_CONFIG_PATH) { $env:DIGEST_CONFIG_PATH } else { Join-Path $PSScriptRoot 'digest-config.json' }
     if (-not (Test-Path $path)) { throw "Config not found at $path. Save it from the Digest Console first." }
