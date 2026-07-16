@@ -62,20 +62,67 @@ try {
 }
 
 Write-Output "`n===== 6. GRAPH ACCESS PER RECIPIENT ====="
+Write-Output "(Tests the ACTUAL endpoints the engine uses. A directory lookup like /users/{id}"
+Write-Output " would need User.Read.All, which we intentionally did NOT grant.)"
+
+# PS 5.1 hides the Graph error body behind a generic message -- dig it out.
+function Get-GraphErr($err) {
+    try {
+        $resp = $err.Exception.Response
+        if ($resp) {
+            $stream = $resp.GetResponseStream()
+            $stream.Position = 0
+            $body = (New-Object System.IO.StreamReader($stream)).ReadToEnd()
+            if ($body) { return $body }
+        }
+    } catch {}
+    return $err.Exception.Message
+}
+
 $gTok = (Invoke-RestMethod -Method Get `
     -Uri "$($env:IDENTITY_ENDPOINT)?resource=https://graph.microsoft.com&api-version=2019-08-01" `
     -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
 Write-Output "Graph token acquired      : $([bool]$gTok)"
+$h = @{ Authorization = "Bearer $gTok" }
+
+# Show what roles the token itself claims to carry -- decodes the JWT payload.
+try {
+    $payload = $gTok.Split('.')[1].Replace('-','+').Replace('_','/')
+    while ($payload.Length % 4) { $payload += '=' }
+    $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+    Write-Output "Token app id (appid)      : $($claims.appid)"
+    Write-Output "Token roles claim         : $(($claims.roles) -join ', ')"
+    if (-not $claims.roles) {
+        Write-Output "  >> NO ROLES IN TOKEN. The app role assignments were never granted."
+        Write-Output "  >> Run Grant-DigestPermissions.ps1, then wait a few minutes."
+    }
+} catch { Write-Output "Could not decode token claims: $($_.Exception.Message)" }
 
 foreach ($r in @($cfg.recipients)) {
+    $e = $r.email
     try {
-        $u = Invoke-RestMethod -Method Get `
-            -Uri "https://graph.microsoft.com/v1.0/users/$($r.email)?`$select=displayName,mail" `
-            -Headers @{ Authorization = "Bearer $gTok" }
-        Write-Output "  READ OK  $($r.email) -> $($u.displayName)"
-    } catch {
-        Write-Output "  READ FAIL $($r.email) : $($_.Exception.Message)"
-    }
+        $null = Invoke-RestMethod -Method Get -ErrorAction Stop -Headers $h `
+            -Uri "https://graph.microsoft.com/v1.0/users/$e/mailFolders/inbox/messages?`$top=1&`$select=subject"
+        Write-Output "  MAIL  OK   $e"
+    } catch { Write-Output "  MAIL  FAIL $e : $(Get-GraphErr $_)" }
+
+    try {
+        $s = [DateTime]::UtcNow.AddDays(-1).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $t = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $null = Invoke-RestMethod -Method Get -ErrorAction Stop -Headers $h `
+            -Uri "https://graph.microsoft.com/v1.0/users/$e/calendarView?startDateTime=$s&endDateTime=$t&`$top=1&`$select=subject"
+        Write-Output "  CAL   OK   $e"
+    } catch { Write-Output "  CAL   FAIL $e : $(Get-GraphErr $_)" }
 }
+
+try {
+    $null = Invoke-RestMethod -Method Get -ErrorAction Stop -Headers $h `
+        -Uri "https://graph.microsoft.com/v1.0/users/$($cfg.sender)/mailFolders/inbox?`$select=id"
+    Write-Output "  SENDER OK  $($cfg.sender)"
+} catch { Write-Output "  SENDER FAIL $($cfg.sender) : $(Get-GraphErr $_)" }
+
+Write-Output "`nHOW TO READ A 403:"
+Write-Output "  'Access is denied' / Authorization_RequestDenied  -> app roles missing or not propagated"
+Write-Output "  'Access to OData is disabled'                     -> Application Access Policy is blocking"
 
 Write-Output "`n===== DONE ====="
