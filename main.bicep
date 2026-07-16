@@ -1,10 +1,15 @@
-// Executive Daily Digest - one-click infrastructure
-// Deploys: storage + config container, Automation account with a managed
-// identity, the runbook (pulled from your repo), a weekday-morning schedule,
-// and the role grant so the engine can read its config.
+// Executive Daily Digest - infrastructure (Option B: portal runbook import)
 //
-// After this deploys, run Grant-DigestPermissions.ps1 once to give the managed
-// identity its Graph permissions and scope it to the leadership mailboxes.
+// Deploys: storage + config container, Automation account with a system-assigned
+// managed identity, a weekday-morning schedule, and the role grant so the engine
+// can read its config blob.
+//
+// The runbook itself is NOT deployed here -- you import Send-ExecDailyDigest.ps1
+// through the portal, so the code never leaves your machine except into your own
+// tenant. After importing, link it to the 'DailyMorning' schedule (2 clicks).
+//
+// Then run Grant-DigestPermissions.ps1 once to give the managed identity its
+// Graph permissions and scope it to the leadership mailboxes.
 
 @description('Region for all resources.')
 param location string = resourceGroup().location
@@ -12,14 +17,11 @@ param location string = resourceGroup().location
 @description('Short prefix for resource names (lowercase letters/numbers).')
 param namePrefix string = 'execdigest'
 
-@description('Raw URL to Send-ExecDailyDigest.ps1 (e.g. a GitHub raw link).')
-param runbookUri string
-
-@description('Timezone the daily job fires in.')
+@description('Timezone the daily job fires in. DST is handled automatically.')
 param scheduleTimeZone string = 'America/Chicago'
 
-@description('First run. Defaults to 7:00 AM tomorrow, Central. Adjust the offset for other zones.')
-param scheduleStartTime string = '${substring(dateTimeAdd(utcNow(), 'P1D'), 0, 10)}T07:00:00-06:00'
+@description('First run: 7:00 AM tomorrow. The offset must match your CURRENT clock (-05:00 = Central Daylight, summer; -06:00 = Central Standard, winter). Only the first run uses this; the timeZone above governs the rest.')
+param scheduleStartTime string = '${substring(dateTimeAdd(utcNow(), 'P1D'), 0, 10)}T07:00:00-05:00'
 
 var storageName    = toLower('${namePrefix}${uniqueString(resourceGroup().id)}')
 var automationName = '${namePrefix}-aa-${uniqueString(resourceGroup().id)}'
@@ -55,21 +57,6 @@ resource automation 'Microsoft.Automation/automationAccounts@2023-11-01' = {
   }
 }
 
-// The runbook, imported and published straight from your repo.
-resource runbook 'Microsoft.Automation/automationAccounts/runbooks@2023-11-01' = {
-  parent: automation
-  name: 'Send-ExecDailyDigest'
-  location: location
-  properties: {
-    runbookType: 'PowerShell'
-    logProgress: false
-    logVerbose: false
-    publishContentLink: {
-      uri: runbookUri
-    }
-  }
-}
-
 // Non-secret pointers the engine reads to find its config blob.
 resource vStorage 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
   parent: automation
@@ -87,11 +74,12 @@ resource vBlob 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = 
   properties: { value: '"digest-config.json"', isEncrypted: false }
 }
 
-// ---- weekday-morning schedule, linked to the runbook ----
+// ---- weekday-morning schedule (link it to the runbook in the portal after import) ----
 resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01' = {
   parent: automation
   name: 'DailyMorning'
   properties: {
+    description: 'Executive Daily Digest - weekday morning send'
     frequency: 'Week'
     interval: 1
     startTime: scheduleStartTime
@@ -100,15 +88,6 @@ resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01'
       weekDays: [ 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday' ]
     }
   }
-}
-resource jobSchedule 'Microsoft.Automation/automationAccounts/jobSchedules@2023-11-01' = {
-  parent: automation
-  name: guid(automation.id, 'DailyMorning', 'Send-ExecDailyDigest')
-  properties: {
-    runbook: { name: runbook.name }
-    schedule: { name: schedule.name }
-  }
-  dependsOn: [ runbook, schedule ]
 }
 
 // ---- let the engine's identity read the config blob ----
@@ -122,9 +101,9 @@ resource blobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// ---- what you need for the one post-deploy step ----
+// ---- what you need for the next steps ----
 output automationAccountName string = automation.name
 output storageAccountName string = sa.name
 @description('Feed this to Grant-DigestPermissions.ps1 as -AutomationPrincipalId.')
 output managedIdentityObjectId string = automation.identity.principalId
-output uploadConfigHint string = 'Upload digest-config.json into the "config" container of ${sa.name}.'
+output nextSteps string = 'Import Send-ExecDailyDigest.ps1 into ${automation.name} > Runbooks > Import, publish it, link it to the DailyMorning schedule, then upload digest-config.json to the "config" container in ${sa.name}.'

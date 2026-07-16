@@ -1,0 +1,25 @@
+{
+  "orgName": "Cutting Edge Automotive Solutions",
+  "sender": "reports@ceasusa.com",
+  "subjectPrefix": "Your daily digest",
+  "sendTimeLocal": "07:00",
+  "timeZoneId": "Central Standard Time",
+  "headerColor": "#0a2540",
+  "accentColor": "#c8102e",
+  "logoUrl": "",
+  "useAiNarrative": false,
+  "active": true,
+  "sections": {
+    "needsResponse": true,
+    "unread": true,
+    "declinedCancelled": true,
+    "onCalendar": true
+  },
+  "recipients": [
+    {
+      "name": "Joe Rodriguez",
+      "email": "jrodriguez@ceasusa.com",
+      "enabled": true
+    }
+  ]
+}

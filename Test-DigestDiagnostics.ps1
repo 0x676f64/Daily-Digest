@@ -1,0 +1,81 @@
+<#
+  Test-DigestDiagnostics.ps1 — throwaway. Import, publish, Start, read Output.
+  Dumps what the engine actually sees. Sends nothing. Reads no mailboxes.
+#>
+
+Write-Output "===== 1. IDENTITY ====="
+Write-Output "IDENTITY_ENDPOINT present : $([bool]$env:IDENTITY_ENDPOINT)"
+Write-Output "PowerShell version        : $($PSVersionTable.PSVersion)"
+
+Write-Output "`n===== 2. AUTOMATION VARIABLES ====="
+foreach ($n in 'StorageAccount','ConfigContainer','ConfigBlob') {
+    try {
+        $v = Get-AutomationVariable -Name $n -ErrorAction Stop
+        Write-Output ("{0,-16} = '{1}'  (type: {2})" -f $n, $v, $v.GetType().Name)
+    } catch {
+        Write-Output ("{0,-16} = <<FAILED: {1}>>" -f $n, $_.Exception.Message)
+    }
+}
+
+Write-Output "`n===== 3. RAW BLOB FETCH ====="
+$acct = Get-AutomationVariable -Name 'StorageAccount'
+$cont = Get-AutomationVariable -Name 'ConfigContainer'
+$blob = Get-AutomationVariable -Name 'ConfigBlob'
+$url  = "https://$acct.blob.core.windows.net/$cont/$blob"
+Write-Output "URL: $url"
+
+$stTok = (Invoke-RestMethod -Method Get `
+    -Uri "$($env:IDENTITY_ENDPOINT)?resource=https://storage.azure.com&api-version=2019-08-01" `
+    -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
+Write-Output "Storage token acquired    : $([bool]$stTok)"
+
+$raw = Invoke-RestMethod -Method Get -Uri $url `
+        -Headers @{ Authorization = "Bearer $stTok"; 'x-ms-version' = '2021-08-06' }
+Write-Output "Returned .NET type        : $($raw.GetType().FullName)"
+Write-Output "Is string?                : $($raw -is [string])"
+
+Write-Output "`n===== 4. PARSED CONFIG ====="
+$cfg = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw }
+Write-Output "cfg type                  : $($cfg.GetType().FullName)"
+Write-Output "Top-level properties      : $(($cfg.PSObject.Properties.Name) -join ', ')"
+Write-Output "timeZoneId                : '$($cfg.timeZoneId)'"
+Write-Output "sender                    : '$($cfg.sender)'"
+Write-Output "orgName                   : '$($cfg.orgName)'"
+Write-Output "recipients count          : $(@($cfg.recipients).Count)"
+foreach ($r in @($cfg.recipients)) {
+    Write-Output ("  - '{0}'  enabled={1} (type {2})" -f $r.email, $r.enabled, $(if($null -ne $r.enabled){$r.enabled.GetType().Name}else{'NULL'}))
+}
+Write-Output "enabled recipients        : $(@($cfg.recipients | Where-Object { $_.enabled }).Count)"
+
+Write-Output "`n===== 5. TIME WINDOW ====="
+try {
+    $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
+    Write-Output "Timezone resolved         : $($tz.Id)"
+    $nowLocal   = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+    $startLocal = $nowLocal.Date.AddDays(-1)
+    Write-Output "Now (local)               : $nowLocal"
+    Write-Output "Yesterday start (local)   : $startLocal"
+    Write-Output "Label                     : '$($startLocal.ToString('dddd, MMMM d'))'"
+    Write-Output "Current culture           : $([System.Globalization.CultureInfo]::CurrentCulture.Name) / UI $([System.Globalization.CultureInfo]::CurrentUICulture.Name)"
+} catch {
+    Write-Output "TIMEZONE FAILED           : $($_.Exception.Message)"
+}
+
+Write-Output "`n===== 6. GRAPH ACCESS PER RECIPIENT ====="
+$gTok = (Invoke-RestMethod -Method Get `
+    -Uri "$($env:IDENTITY_ENDPOINT)?resource=https://graph.microsoft.com&api-version=2019-08-01" `
+    -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
+Write-Output "Graph token acquired      : $([bool]$gTok)"
+
+foreach ($r in @($cfg.recipients)) {
+    try {
+        $u = Invoke-RestMethod -Method Get `
+            -Uri "https://graph.microsoft.com/v1.0/users/$($r.email)?`$select=displayName,mail" `
+            -Headers @{ Authorization = "Bearer $gTok" }
+        Write-Output "  READ OK  $($r.email) -> $($u.displayName)"
+    } catch {
+        Write-Output "  READ FAIL $($r.email) : $($_.Exception.Message)"
+    }
+}
+
+Write-Output "`n===== DONE ====="
