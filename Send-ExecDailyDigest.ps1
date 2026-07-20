@@ -11,9 +11,20 @@
 
   Graph application permissions required (granted to whichever identity is used,
   and admin-consented):  Mail.Read, Calendars.Read, Mail.Send
-  Scope the identity to the leadership mailboxes with an Exchange Online
-  Application Access Policy. (Both done once by Grant-DigestPermissions.ps1.)
+  Mailbox scoping is enforced by RBAC for Applications (Grant-DigestPermissionsRBAC.ps1).
+  Application Access Policies are legacy and should not be used.
+
+  PARAMETERS (leave both blank for normal scheduled operation):
+    TargetDate      - yyyy-MM-dd. Report on this day instead of yesterday.
+                      Useful for testing against a day you know had activity.
+    SendEvenIfEmpty - send the digest even when there is nothing to report,
+                      so you can see the layout land in your inbox.
 #>
+
+param(
+    [string] $TargetDate = '',
+    [bool]   $SendEvenIfEmpty = $false
+)
 
 $MaxItems = 50
 $UseManagedIdentity = [bool]$env:IDENTITY_ENDPOINT   # present in the Azure Automation sandbox
@@ -94,11 +105,25 @@ function Invoke-GraphGet {
     $items
 }
 
-function Get-YesterdayWindowUtc {
-    $tz         = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
-    $nowLocal   = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
-    $startLocal = $nowLocal.Date.AddDays(-1)
-    $endLocal   = $nowLocal.Date
+function Get-ReportWindowUtc {
+    $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
+
+    if ($TargetDate) {
+        # Explicit day requested (testing).
+        $parsed = [datetime]::MinValue
+        if (-not [datetime]::TryParseExact($TargetDate, 'yyyy-MM-dd',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            throw "TargetDate '$TargetDate' is not valid. Use yyyy-MM-dd, e.g. 2026-07-14."
+        }
+        $startLocal = $parsed.Date
+    } else {
+        # Normal operation: yesterday, local time.
+        $nowLocal   = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+        $startLocal = $nowLocal.Date.AddDays(-1)
+    }
+    $endLocal = $startLocal.AddDays(1)
+
     [pscustomobject]@{
         StartUtc = [System.TimeZoneInfo]::ConvertTimeToUtc($startLocal, $tz).ToString("yyyy-MM-ddTHH:mm:ssZ")
         EndUtc   = [System.TimeZoneInfo]::ConvertTimeToUtc($endLocal,   $tz).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -136,21 +161,78 @@ function Split-Events {
     [pscustomobject]@{ NeedsResponse = $needs; DeclinedCancelled = $gone; OnCalendar = $cal }
 }
 
+# Builds a compact, readable summary of the day for the model to reason over.
+# Feeding real subjects/senders (not just counts) is what lets it point at a priority.
+function Build-AiFacts {
+    param([array]$Unread, $Meetings)
+    $lines = @()
+    if ($Meetings.NeedsResponse.Count) {
+        $lines += "MEETING INVITES AWAITING YOUR RESPONSE:"
+        foreach ($e in $Meetings.NeedsResponse) {
+            $lines += "  - '$($e.subject)' from $($e.organizer.emailAddress.name)"
+        }
+    }
+    if ($Unread.Count) {
+        $lines += "UNREAD EMAIL FROM YESTERDAY:"
+        foreach ($m in ($Unread | Select-Object -First 15)) {
+            $from = if ($m.from.emailAddress.name) { $m.from.emailAddress.name } else { $m.from.emailAddress.address }
+            $lines += "  - '$($m.subject)' from $from"
+        }
+    }
+    if ($Meetings.DeclinedCancelled.Count) {
+        $lines += "DECLINED OR CANCELLED: $($Meetings.DeclinedCancelled.Count) event(s)."
+    }
+    if ($Meetings.OnCalendar.Count) {
+        $lines += "OTHER MEETINGS ON CALENDAR: $($Meetings.OnCalendar.Count)."
+    }
+    if (-not $lines) { $lines += "Nothing unread, no unanswered invites, nothing cancelled." }
+    $lines -join "`n"
+}
+
 function Get-AiIntro {
     param([string]$Facts)
     if (-not $cfg.useAiNarrative) { return $null }
+
+    $system = @'
+You write the opening line of an executive's daily email digest. Below the line you write,
+the reader sees the full itemized lists, so DO NOT re-list everything.
+
+Your job: in ONE to TWO sentences, point them to what deserves attention first.
+- Lead with the single most important thing that needs their action (an unanswered invite
+  or an unread email that reads time-sensitive: contracts, legal, signatures, renewals,
+  named customers, money, deadlines).
+- If more than one thing matters, name the top one and note "and a few others."
+- End with a quick read of the day's load (e.g. "otherwise a light morning").
+- If there is genuinely nothing pressing, say so plainly in one sentence.
+
+Rules: plain professional English. No greeting, no name, no emojis, no bullet points,
+no sign-off. Use only plain ASCII punctuation -- a hyphen "-" instead of an em-dash, and
+straight quotes. Do not invent anything not present in the data. Never exceed two sentences.
+'@
     $body = @{
         messages = @(
-            @{ role='system'; content='Write a 2-sentence, plain, no-fluff intro for an executive daily digest. No emojis, no greeting.' }
+            @{ role='system'; content=$system }
             @{ role='user';   content=$Facts }
         )
-        max_tokens = 120; temperature = 0.3
+        max_completion_tokens = 400
     } | ConvertTo-Json -Depth 6
+    $endpoint   = Get-Setting 'AOAI_ENDPOINT'   'AOAI_ENDPOINT'
+    $deployment = Get-Setting 'AOAI_DEPLOYMENT' 'AOAI_DEPLOYMENT'
+    $apiKey     = Get-Setting 'AOAI_API_KEY'    'AOAI_API_KEY'
+    if (-not ($endpoint -and $deployment -and $apiKey)) {
+        Write-Warning "AI intro on, but AOAI settings missing (AOAI_ENDPOINT/AOAI_DEPLOYMENT/AOAI_API_KEY). Sending without intro."
+        return $null
+    }
     try {
-        $uri = "$($env:AOAI_ENDPOINT)/openai/deployments/$($env:AOAI_DEPLOYMENT)/chat/completions?api-version=2024-06-01"
-        (Invoke-RestMethod -Method Post -Uri $uri -ContentType 'application/json' `
-            -Headers @{ 'api-key'=$env:AOAI_API_KEY } -Body $body).choices[0].message.content
-    } catch { $null }
+        $uri = "$($endpoint.TrimEnd('/'))/openai/deployments/$deployment/chat/completions?api-version=2025-01-01-preview"
+        $text = (Invoke-RestMethod -Method Post -Uri $uri -ContentType 'application/json' `
+            -Headers @{ 'api-key'=$apiKey } -Body $body).choices[0].message.content
+        if ($text) { return $text.Trim() }
+        return $null
+    } catch {
+        Write-Warning "AI intro skipped: $($_.Exception.Message)"
+        return $null   # never let the AI layer break the digest
+    }
 }
 
 # --- HTML (eye-catching, Outlook-safe: tables + inline styles) ----------------
@@ -206,6 +288,7 @@ function New-DigestHtml {
     $logo = if ($cfg.logoUrl){ "<img src='$($cfg.logoUrl)' height='24' style='display:block;margin-bottom:8px' alt='$($cfg.orgName)'>" } else { "" }
 
     @"
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 <div style="background:#eef1f5;padding:24px 12px">
 <div style="max-width:600px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;background:#ffffff;border:1px solid $line;border-radius:10px;overflow:hidden">
   <div style="background:$navy;padding:20px 24px">
@@ -237,16 +320,23 @@ function Send-Digest {
         }
         saveToSentItems = $false
     } | ConvertTo-Json -Depth 8
+    # Encode the body as UTF-8 bytes explicitly. Without this, PowerShell 5.1 sends the
+    # JSON as Latin-1 and any non-ASCII the AI produced (em-dash, curly quotes) arrives
+    # mojibaked as "a-hat" sequences.
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
     Invoke-RestMethod -Method Post `
         -Uri "https://graph.microsoft.com/v1.0/users/$($cfg.sender)/sendMail" `
         -Headers @{ Authorization = "Bearer $script:Token" } `
-        -ContentType 'application/json' -Body $payload
+        -ContentType 'application/json; charset=utf-8' -Body $bytes
 }
 
 # --- Main ---------------------------------------------------------------------
 $script:Token = Get-GraphToken
-$win = Get-YesterdayWindowUtc
+$win = Get-ReportWindowUtc
 Write-Output "Digest run for $($win.Label) (managed identity: $UseManagedIdentity)"
+Write-Output "Window: $($win.StartUtc) -> $($win.EndUtc)"
+if ($TargetDate)      { Write-Output "TargetDate override active: $TargetDate" }
+if ($SendEvenIfEmpty) { Write-Output "SendEvenIfEmpty active: will send even with nothing to report" }
 
 foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
     $upn = $r.email
@@ -255,10 +345,17 @@ foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
         $events   = Get-EventsYesterday -Upn $upn -StartUtc $win.StartUtc -EndUtc $win.EndUtc
         $meetings = Split-Events -Events $events
 
+        Write-Output ("$upn : found {0} unread, {1} unanswered, {2} declined/cancelled, {3} other events." -f `
+            $unread.Count, $meetings.NeedsResponse.Count, $meetings.DeclinedCancelled.Count, $meetings.OnCalendar.Count)
+
         if ($unread.Count -eq 0 -and $meetings.NeedsResponse.Count -eq 0 -and $meetings.DeclinedCancelled.Count -eq 0) {
-            Write-Output "$upn : nothing to report, skipped."; continue
+            if (-not $SendEvenIfEmpty) {
+                Write-Output "$upn : nothing to report, skipped. (Use SendEvenIfEmpty to send anyway.)"
+                continue
+            }
+            Write-Output "$upn : nothing to report, but SendEvenIfEmpty is set -- sending."
         }
-        $facts = "Unread: $($unread.Count). Never-responded meetings: $($meetings.NeedsResponse.Count). Declined/cancelled: $($meetings.DeclinedCancelled.Count)."
+        $facts = Build-AiFacts -Unread $unread -Meetings $meetings
         $intro = Get-AiIntro -Facts $facts
         $html  = New-DigestHtml -Label $win.Label -Unread $unread -Meetings $meetings -Intro $intro
         Send-Digest -ToUpn $upn -Subject "$($cfg.subjectPrefix) - $($win.Label)" -Html $html

@@ -1,13 +1,13 @@
 {
   "orgName": "Cutting Edge Automotive Solutions",
-  "sender": "jrodriguez@ceasusa.com",
+  "sender": "reports@ceasusa.com",
   "subjectPrefix": "Your daily digest",
   "sendTimeLocal": "07:00",
   "timeZoneId": "Central Standard Time",
-  "headerColor": "#0a2540",
+  "headerColor": "#111921",
   "accentColor": "#c8102e",
   "logoUrl": "",
-  "useAiNarrative": false,
+  "useAiNarrative": true,
   "active": true,
   "sections": {
     "needsResponse": true,
@@ -16,10 +16,8 @@
     "onCalendar": true
   },
   "recipients": [
-    {
-      "name": "Joe Rodriguez",
-      "email": "jrodriguez@ceasusa.com",
-      "enabled": true
-    }
+    { "name": "Joe Rodriguez", "email": "jrodriguez@ceasusa.com", "enabled": true },
+    { "name": "FirstName LastName", "email": "someone@ceasusa.com", "enabled": false },
+    { "name": "FirstName LastName", "email": "another@ceasusa.com", "enabled": false }
   ]
 }
