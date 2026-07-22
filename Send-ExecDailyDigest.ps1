@@ -105,33 +105,54 @@ function Invoke-GraphGet {
     $items
 }
 
+# Returns two windows plus the local reference day:
+#   Email   : looks BACKWARD  (the previous day) -- what you may have missed.
+#   Calendar: looks FORWARD   (from local midnight of the reference day
+#             through the end of the NEXT day) -- what is coming up.
+# TargetDate overrides the reference "today" for testing.
 function Get-ReportWindowUtc {
     $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
+    $nowLocal = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
 
     if ($TargetDate) {
-        # Explicit day requested (testing).
         $parsed = [datetime]::MinValue
         if (-not [datetime]::TryParseExact($TargetDate, 'yyyy-MM-dd',
                 [Globalization.CultureInfo]::InvariantCulture,
                 [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
             throw "TargetDate '$TargetDate' is not valid. Use yyyy-MM-dd, e.g. 2026-07-14."
         }
-        $startLocal = $parsed.Date
+        $todayLocal = $parsed.Date
     } else {
-        # Normal operation: yesterday, local time.
-        $nowLocal   = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
-        $startLocal = $nowLocal.Date.AddDays(-1)
+        $todayLocal = $nowLocal.Date
     }
-    $endLocal = $startLocal.AddDays(1)
+
+    # Email: the full previous calendar day.
+    $mailStartLocal = $todayLocal.AddDays(-1)
+    $mailEndLocal   = $todayLocal
+
+    # Calendar: today + tomorrow (through end of tomorrow).
+    $calStartLocal  = $todayLocal
+    $calEndLocal    = $todayLocal.AddDays(2)
+
+    $toUtc = { param($d) [System.TimeZoneInfo]::ConvertTimeToUtc($d, $tz).ToString("yyyy-MM-ddTHH:mm:ssZ") }
 
     [pscustomobject]@{
-        StartUtc = [System.TimeZoneInfo]::ConvertTimeToUtc($startLocal, $tz).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        EndUtc   = [System.TimeZoneInfo]::ConvertTimeToUtc($endLocal,   $tz).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        Label    = $startLocal.ToString('dddd, MMMM d')
+        # email window
+        MailStartUtc = & $toUtc $mailStartLocal
+        MailEndUtc   = & $toUtc $mailEndLocal
+        MailLabel    = $mailStartLocal.ToString('dddd, MMMM d')
+        # calendar window
+        CalStartUtc  = & $toUtc $calStartLocal
+        CalEndUtc    = & $toUtc $calEndLocal
+        # local anchors for grouping today vs tomorrow
+        TodayLocal   = $todayLocal
+        TomorrowLocal= $todayLocal.AddDays(1)
+        TodayLabel   = $todayLocal.ToString('dddd, MMMM d')
+        TomorrowLabel= $todayLocal.AddDays(1).ToString('dddd, MMMM d')
     }
 }
 
-function Get-UnreadYesterday {
+function Get-UnreadEmail {
     param([string]$Upn, [string]$StartUtc, [string]$EndUtc)
     $filter = "isRead eq false and receivedDateTime ge $StartUtc and receivedDateTime lt $EndUtc"
     $uri = "https://graph.microsoft.com/v1.0/users/$Upn/mailFolders/inbox/messages" +
@@ -140,7 +161,7 @@ function Get-UnreadYesterday {
     Invoke-GraphGet -Uri $uri | Sort-Object receivedDateTime -Descending
 }
 
-function Get-EventsYesterday {
+function Get-UpcomingEvents {
     param([string]$Upn, [string]$StartUtc, [string]$EndUtc)
     $uri = "https://graph.microsoft.com/v1.0/users/$Upn/calendarView" +
            "?startDateTime=$StartUtc&endDateTime=$EndUtc" +
@@ -148,17 +169,43 @@ function Get-EventsYesterday {
     Invoke-GraphGet -Uri $uri -ExtraHeaders @{ 'Prefer' = "outlook.timezone=""$($cfg.timeZoneId)""" }
 }
 
+# Forward-looking: bucket upcoming events into Today and Tomorrow, skip cancelled
+# ones, and mark whether each still needs the recipient to respond.
 function Split-Events {
-    param([array]$Events)
-    $needs = @(); $gone = @(); $cal = @()
+    param([array]$Events, $Win)
+    $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZoneId)
+    $today = @(); $tomorrow = @(); $needsCount = 0
+
     foreach ($e in $Events) {
+        if ($e.isCancelled) { continue }               # not relevant looking forward
+        if ($e.isAllDay)    { continue }               # skip all-day/OOO blocks
+
+        # Event start, in local time, for day grouping.
+        $startLocal = [datetime]$e.start.dateTime
         $r = $e.responseStatus.response
-        if     ($e.isCancelled)                   { $gone  += $e }
-        elseif ($r -eq 'declined')                { $gone  += $e }
-        elseif ($r -in @('none','notResponded'))  { $needs += $e }
-        else                                      { $cal   += $e }
+        $needsResponse = $r -in @('none','notResponded')
+        if ($needsResponse) { $needsCount++ }
+
+        $row = [pscustomobject]@{
+            Subject   = $e.subject
+            StartLocal= $startLocal
+            Organizer = $e.organizer.emailAddress.name
+            Needs     = $needsResponse
+            WebLink   = $e.webLink
+        }
+
+        if     ($startLocal.Date -eq $Win.TodayLocal)    { $today    += $row }
+        elseif ($startLocal.Date -eq $Win.TomorrowLocal) { $tomorrow += $row }
     }
-    [pscustomobject]@{ NeedsResponse = $needs; DeclinedCancelled = $gone; OnCalendar = $cal }
+
+    $today    = @($today    | Sort-Object StartLocal)
+    $tomorrow = @($tomorrow | Sort-Object StartLocal)
+
+    [pscustomobject]@{
+        Today            = $today
+        Tomorrow         = $tomorrow
+        NeedsResponseCnt = $needsCount
+    }
 }
 
 # Builds a compact, readable summary of the day for the model to reason over.
@@ -166,26 +213,29 @@ function Split-Events {
 function Build-AiFacts {
     param([array]$Unread, $Meetings)
     $lines = @()
-    if ($Meetings.NeedsResponse.Count) {
-        $lines += "MEETING INVITES AWAITING YOUR RESPONSE:"
-        foreach ($e in $Meetings.NeedsResponse) {
-            $lines += "  - '$($e.subject)' from $($e.organizer.emailAddress.name)"
-        }
-    }
+
     if ($Unread.Count) {
-        $lines += "UNREAD EMAIL FROM YESTERDAY:"
+        $lines += "UNREAD EMAIL FROM YESTERDAY (may have been missed):"
         foreach ($m in ($Unread | Select-Object -First 15)) {
             $from = if ($m.from.emailAddress.name) { $m.from.emailAddress.name } else { $m.from.emailAddress.address }
             $lines += "  - '$($m.subject)' from $from"
         }
     }
-    if ($Meetings.DeclinedCancelled.Count) {
-        $lines += "DECLINED OR CANCELLED: $($Meetings.DeclinedCancelled.Count) event(s)."
+    if ($Meetings.Today.Count) {
+        $lines += "MEETINGS TODAY:"
+        foreach ($e in $Meetings.Today) {
+            $tag = if ($e.Needs) { " [NOT YET ACCEPTED]" } else { "" }
+            $lines += "  - $($e.StartLocal.ToString('h:mm tt')) '$($e.Subject)' from $($e.Organizer)$tag"
+        }
     }
-    if ($Meetings.OnCalendar.Count) {
-        $lines += "OTHER MEETINGS ON CALENDAR: $($Meetings.OnCalendar.Count)."
+    if ($Meetings.Tomorrow.Count) {
+        $lines += "MEETINGS TOMORROW:"
+        foreach ($e in $Meetings.Tomorrow) {
+            $tag = if ($e.Needs) { " [NOT YET ACCEPTED]" } else { "" }
+            $lines += "  - $($e.StartLocal.ToString('h:mm tt')) '$($e.Subject)' from $($e.Organizer)$tag"
+        }
     }
-    if (-not $lines) { $lines += "Nothing unread, no unanswered invites, nothing cancelled." }
+    if (-not $lines) { $lines += "No unread email, and no meetings scheduled for today or tomorrow." }
     $lines -join "`n"
 }
 
@@ -197,13 +247,15 @@ function Get-AiIntro {
 You write the opening line of an executive's daily email digest. Below the line you write,
 the reader sees the full itemized lists, so DO NOT re-list everything.
 
-Your job: in ONE to TWO sentences, point them to what deserves attention first.
-- Lead with the single most important thing that needs their action (an unanswered invite
-  or an unread email that reads time-sensitive: contracts, legal, signatures, renewals,
-  named customers, money, deadlines).
-- If more than one thing matters, name the top one and note "and a few others."
-- End with a quick read of the day's load (e.g. "otherwise a light morning").
-- If there is genuinely nothing pressing, say so plainly in one sentence.
+The digest has two parts: email that may have been MISSED yesterday, and the meetings
+COMING UP today and tomorrow.
+
+Your job: in ONE to TWO sentences, orient them to the day ahead and flag anything needing action.
+- Lead with the day ahead: how busy today looks, and call out the first or most important
+  meeting (especially any marked NOT YET ACCEPTED -- those need an RSVP).
+- Then, if there is time-sensitive unread email (contracts, legal, signatures, renewals,
+  named customers, money, deadlines), point to the most important one.
+- If today is clear and nothing was missed, say so plainly in one sentence.
 
 Rules: plain professional English. No greeting, no name, no emojis, no bullet points,
 no sign-off. Use only plain ASCII punctuation -- a hyphen "-" instead of an em-dash, and
@@ -237,7 +289,7 @@ straight quotes. Do not invent anything not present in the data. Never exceed tw
 
 # --- HTML (eye-catching, Outlook-safe: tables + inline styles) ----------------
 function New-DigestHtml {
-    param([string]$Label, [array]$Unread, $Meetings, [string]$Intro)
+    param($Win, [array]$Unread, $Meetings, [string]$Intro)
 
     $navy = $cfg.headerColor
     $red  = $cfg.accentColor
@@ -259,10 +311,13 @@ function New-DigestHtml {
         "<div style='font-size:12px;color:$muted;margin-top:3px'>$(& $enc $from) &nbsp;&middot;&nbsp; $t</div></td></tr>"
     }
     function EventRow($e){
-        $t = ([datetime]$e.start.dateTime).ToString('h:mm tt')
+        $t = $e.StartLocal.ToString('h:mm tt')
+        $flag = if ($e.Needs) {
+            " &nbsp; <span style='background:$red;color:#fff;font-size:10px;font-weight:700;padding:1px 7px;border-radius:20px'>RSVP</span>"
+        } else { "" }
         "<tr><td style='padding:10px 14px;border-bottom:1px solid $line'>" +
-        "<div style='font-size:14px;font-weight:600;color:$navy'>$(& $enc $e.subject)</div>" +
-        "<div style='font-size:12px;color:$muted;margin-top:3px'>$t &nbsp;&middot;&nbsp; from $(& $enc $e.organizer.emailAddress.name)</div></td></tr>"
+        "<div style='font-size:14px;font-weight:600;color:$navy'>$(& $enc $e.Subject)$flag</div>" +
+        "<div style='font-size:12px;color:$muted;margin-top:3px'>$t &nbsp;&middot;&nbsp; from $(& $enc $e.Organizer)</div></td></tr>"
     }
     function Section($title,$rows,$count,$accent,$tint){
         if ($count -eq 0){ return "" }
@@ -273,17 +328,18 @@ function New-DigestHtml {
         "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse'>$rows</table></div>"
     }
 
-    $emailRows = ($Unread | Select-Object -First $MaxItems | ForEach-Object { EmailRow $_ }) -join ''
-    $needRows  = ($Meetings.NeedsResponse     | ForEach-Object { EventRow $_ }) -join ''
-    $goneRows  = ($Meetings.DeclinedCancelled | ForEach-Object { EventRow $_ }) -join ''
-    $calRows   = ($Meetings.OnCalendar        | ForEach-Object { EventRow $_ }) -join ''
+    $emailRows    = ($Unread | Select-Object -First $MaxItems | ForEach-Object { EmailRow $_ }) -join ''
+    $todayRows    = ($Meetings.Today    | ForEach-Object { EventRow $_ }) -join ''
+    $tomorrowRows = ($Meetings.Tomorrow | ForEach-Object { EventRow $_ }) -join ''
     $introBlock = if ($Intro){ "<div style='background:#f7f9fc;border:1px solid $line;border-radius:6px;padding:14px 16px;margin:0 0 20px;font-size:14px;color:$ink;line-height:1.5'>$(& $enc $Intro)</div>" } else { "" }
 
+    # Forward-looking calendar first (what is coming), then missed email.
     $sec = ""
-    if ($cfg.sections.needsResponse)     { $sec += Section 'Needs your response'  $needRows $Meetings.NeedsResponse.Count     $red      '#fdecee' }
-    if ($cfg.sections.unread)            { $sec += Section 'Unread from yesterday' $emailRows $Unread.Count                   $navy     '#eaf1f9' }
-    if ($cfg.sections.declinedCancelled) { $sec += Section 'Declined or cancelled' $goneRows $Meetings.DeclinedCancelled.Count '#8a97a6' '#f1f4f7' }
-    if ($cfg.sections.onCalendar)        { $sec += Section 'On your calendar'      $calRows  $Meetings.OnCalendar.Count       '#8a97a6' '#f1f4f7' }
+    $sec += Section "Today - $($Win.TodayLabel)"       $todayRows    $Meetings.Today.Count    $navy '#eaf1f9'
+    $sec += Section "Tomorrow - $($Win.TomorrowLabel)" $tomorrowRows $Meetings.Tomorrow.Count  $navy '#eaf1f9'
+    if ($cfg.sections.unread) {
+        $sec += Section 'Unread from yesterday' $emailRows $Unread.Count $red '#fdecee'
+    }
 
     $logo = if ($cfg.logoUrl){ "<img src='$($cfg.logoUrl)' height='24' style='display:block;margin-bottom:8px' alt='$($cfg.orgName)'>" } else { "" }
 
@@ -294,13 +350,13 @@ function New-DigestHtml {
   <div style="background:$navy;padding:20px 24px">
     $logo
     <div style="color:#ffffff;font-size:17px;font-weight:600">Daily executive digest</div>
-    <div style="color:#9db4cc;font-size:12px;margin-top:3px">$($cfg.orgName) &nbsp;&middot;&nbsp; Recap of $Label</div>
+    <div style="color:#9db4cc;font-size:12px;margin-top:3px">$($cfg.orgName) &nbsp;&middot;&nbsp; $($Win.TodayLabel)</div>
   </div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-bottom:1px solid $line">
     <tr>
-      $(Metric $Meetings.NeedsResponse.Count 'Need response' $red '#8a3a44')
-      $(Metric $Unread.Count 'Unread' $navy '#3c5a78')
-      $(Metric $Meetings.DeclinedCancelled.Count 'Cancelled' '#5f6b78' '#5f6b78')
+      $(Metric $Meetings.Today.Count 'Today' $navy '#3c5a78')
+      $(Metric $Meetings.Tomorrow.Count 'Tomorrow' $navy '#3c5a78')
+      $(Metric $Meetings.NeedsResponseCnt 'Need RSVP' $red '#8a3a44')
     </tr>
   </table>
   <div style="padding:22px 24px">$introBlock$sec</div>
@@ -333,22 +389,23 @@ function Send-Digest {
 # --- Main ---------------------------------------------------------------------
 $script:Token = Get-GraphToken
 $win = Get-ReportWindowUtc
-Write-Output "Digest run for $($win.Label) (managed identity: $UseManagedIdentity)"
-Write-Output "Window: $($win.StartUtc) -> $($win.EndUtc)"
+Write-Output "Digest run: email recap $($win.MailLabel); calendar $($win.TodayLabel) + $($win.TomorrowLabel) (managed identity: $UseManagedIdentity)"
+Write-Output "Email window : $($win.MailStartUtc) -> $($win.MailEndUtc)"
+Write-Output "Cal window   : $($win.CalStartUtc) -> $($win.CalEndUtc)"
 if ($TargetDate)      { Write-Output "TargetDate override active: $TargetDate" }
 if ($SendEvenIfEmpty) { Write-Output "SendEvenIfEmpty active: will send even with nothing to report" }
 
 foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
     $upn = $r.email
     try {
-        $unread   = Get-UnreadYesterday -Upn $upn -StartUtc $win.StartUtc -EndUtc $win.EndUtc
-        $events   = Get-EventsYesterday -Upn $upn -StartUtc $win.StartUtc -EndUtc $win.EndUtc
-        $meetings = Split-Events -Events $events
+        $unread   = Get-UnreadEmail    -Upn $upn -StartUtc $win.MailStartUtc -EndUtc $win.MailEndUtc
+        $events   = Get-UpcomingEvents -Upn $upn -StartUtc $win.CalStartUtc  -EndUtc $win.CalEndUtc
+        $meetings = Split-Events -Events $events -Win $win
 
-        Write-Output ("$upn : found {0} unread, {1} unanswered, {2} declined/cancelled, {3} other events." -f `
-            $unread.Count, $meetings.NeedsResponse.Count, $meetings.DeclinedCancelled.Count, $meetings.OnCalendar.Count)
+        Write-Output ("$upn : {0} unread, {1} today, {2} tomorrow, {3} need RSVP." -f `
+            $unread.Count, $meetings.Today.Count, $meetings.Tomorrow.Count, $meetings.NeedsResponseCnt)
 
-        if ($unread.Count -eq 0 -and $meetings.NeedsResponse.Count -eq 0 -and $meetings.DeclinedCancelled.Count -eq 0) {
+        if ($unread.Count -eq 0 -and $meetings.Today.Count -eq 0 -and $meetings.Tomorrow.Count -eq 0) {
             if (-not $SendEvenIfEmpty) {
                 Write-Output "$upn : nothing to report, skipped. (Use SendEvenIfEmpty to send anyway.)"
                 continue
@@ -357,9 +414,9 @@ foreach ($r in ($cfg.recipients | Where-Object { $_.enabled })) {
         }
         $facts = Build-AiFacts -Unread $unread -Meetings $meetings
         $intro = Get-AiIntro -Facts $facts
-        $html  = New-DigestHtml -Label $win.Label -Unread $unread -Meetings $meetings -Intro $intro
-        Send-Digest -ToUpn $upn -Subject "$($cfg.subjectPrefix) - $($win.Label)" -Html $html
-        Write-Output "$upn : sent ($($unread.Count) unread, $($meetings.NeedsResponse.Count) unanswered invites)."
+        $html  = New-DigestHtml -Win $win -Unread $unread -Meetings $meetings -Intro $intro
+        Send-Digest -ToUpn $upn -Subject "$($cfg.subjectPrefix) - $($win.TodayLabel)" -Html $html
+        Write-Output "$upn : sent."
     }
     catch { Write-Warning "$upn : $($_.Exception.Message)" }
 }
